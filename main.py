@@ -171,6 +171,7 @@ def health_check():
     return {
         "status": "healthy",
         "template_available": os.path.exists(TEMPLATE_PATH),
+        "generator_font": IBPresentationGenerator.FONT_TITLE,
     }
 
 
