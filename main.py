@@ -5,10 +5,12 @@ e retorna apresentações PowerPoint formatadas para investment banking.
 
 import os
 import logging
-from fastapi import FastAPI, HTTPException
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
 from generator import IBPresentationGenerator
 
@@ -33,30 +35,93 @@ TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 TEMPLATE_PATH = os.path.join(TEMPLATE_DIR, "ib_master.pptx")
 
 
+def _to_str(v: Any) -> str:
+    if v is None:
+        return ""
+    return str(v)
+
+
+def _to_str_list(v: Any) -> list[str]:
+    if not isinstance(v, list):
+        return []
+    return [str(item) if item is not None else "" for item in v]
+
+
+def _to_float(v: Any) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class SlideColumn(BaseModel):
     subtitle: str = ""
     bullets: list[str] = []
+
+    @field_validator("subtitle", mode="before")
+    @classmethod
+    def coerce_subtitle(cls, v: Any) -> str:
+        return _to_str(v)
+
+    @field_validator("bullets", mode="before")
+    @classmethod
+    def coerce_bullets(cls, v: Any) -> list[str]:
+        return _to_str_list(v)
 
 
 class TableData(BaseModel):
     headers: list[str] = []
     rows: list[list[str]] = []
 
+    @field_validator("headers", mode="before")
+    @classmethod
+    def coerce_headers(cls, v: Any) -> list[str]:
+        return _to_str_list(v)
+
+    @field_validator("rows", mode="before")
+    @classmethod
+    def coerce_rows(cls, v: Any) -> list[list[str]]:
+        if not isinstance(v, list):
+            return []
+        return [_to_str_list(row) for row in v]
+
 
 class ChartSeries(BaseModel):
     name: str = ""
     values: list[float] = []
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def coerce_name(cls, v: Any) -> str:
+        return _to_str(v)
+
+    @field_validator("values", mode="before")
+    @classmethod
+    def coerce_values(cls, v: Any) -> list[float]:
+        if not isinstance(v, list):
+            return []
+        return [_to_float(item) for item in v]
 
 
 class ChartData(BaseModel):
     categories: list[str] = []
     series: list[ChartSeries] = []
 
+    @field_validator("categories", mode="before")
+    @classmethod
+    def coerce_categories(cls, v: Any) -> list[str]:
+        return _to_str_list(v)
+
 
 class MetricItem(BaseModel):
     label: str = ""
     value: str = ""
     variation: str = ""
+
+    @field_validator("label", "value", "variation", mode="before")
+    @classmethod
+    def coerce_str(cls, v: Any) -> str:
+        return _to_str(v)
 
 
 class SlideData(BaseModel):
@@ -73,10 +138,32 @@ class SlideData(BaseModel):
     metrics: list[MetricItem] = []
     contact_info: str = ""
 
+    @field_validator("layout", "title", "subtitle", "date", "chart_type", "contact_info", mode="before")
+    @classmethod
+    def coerce_str(cls, v: Any) -> str:
+        return _to_str(v)
+
+    @field_validator("bullets", mode="before")
+    @classmethod
+    def coerce_bullets(cls, v: Any) -> list[str]:
+        return _to_str_list(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def handle_extra_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data.setdefault("layout", "content")
+        return data
+
 
 class PresentationRequest(BaseModel):
     presentation_title: str = "Apresentação"
     slides: list[SlideData]
+
+    @field_validator("presentation_title", mode="before")
+    @classmethod
+    def coerce_title(cls, v: Any) -> str:
+        return _to_str(v) or "Apresentação"
 
 
 @app.get("/health")
@@ -88,23 +175,41 @@ def health_check():
 
 
 @app.post("/generate")
-def generate_presentation(request: PresentationRequest):
+async def generate_presentation(request: Request):
+    try:
+        raw_body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Body must be valid JSON")
+
+    try:
+        pres = PresentationRequest.model_validate(raw_body)
+    except Exception as e:
+        logger.warning("Validation failed, attempting auto-fix: %s", e)
+        if isinstance(raw_body, dict):
+            raw_body.setdefault("presentation_title", "Apresentação")
+            raw_body.setdefault("slides", [])
+        try:
+            pres = PresentationRequest.model_validate(raw_body)
+        except Exception as e2:
+            logger.error("Validation still failed: %s", e2)
+            raise HTTPException(status_code=400, detail=str(e2))
+
     try:
         logger.info(
             "Gerando apresentação '%s' com %d slides",
-            request.presentation_title,
-            len(request.slides),
+            pres.presentation_title,
+            len(pres.slides),
         )
 
         template = TEMPLATE_PATH if os.path.exists(TEMPLATE_PATH) else None
         gen = IBPresentationGenerator(template_path=template)
 
-        data = request.model_dump()
+        data = pres.model_dump()
         pptx_bytes = gen.generate(data)
 
         safe_title = "".join(
             c if c.isalnum() or c in " -_" else "_"
-            for c in request.presentation_title
+            for c in pres.presentation_title
         ).strip()
         filename = f"{safe_title or 'apresentacao'}.pptx"
 
@@ -125,11 +230,17 @@ def generate_presentation(request: PresentationRequest):
 
 
 @app.post("/preview")
-def preview_slides(request: PresentationRequest):
+async def preview_slides(request: Request):
     """Retorna a estrutura validada dos slides sem gerar o PPTX."""
+    try:
+        raw_body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Body must be valid JSON")
+
+    pres = PresentationRequest.model_validate(raw_body)
     return {
-        "title": request.presentation_title,
-        "total_slides": len(request.slides),
-        "layouts_used": [s.layout for s in request.slides],
-        "slides": request.model_dump()["slides"],
+        "title": pres.presentation_title,
+        "total_slides": len(pres.slides),
+        "layouts_used": [s.layout for s in pres.slides],
+        "slides": pres.model_dump()["slides"],
     }
