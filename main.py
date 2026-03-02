@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator, model_validator
 
 from generator import IBPresentationGenerator
+from google_slides_generator import GoogleSlidesGenerator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ app.add_middleware(
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 TEMPLATE_PATH = os.path.join(TEMPLATE_DIR, "ib_master.pptx")
+GOOGLE_CREDS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
 
 
 def _to_str(v: Any) -> str:
@@ -168,10 +170,14 @@ class PresentationRequest(BaseModel):
 
 @app.get("/health")
 def health_check():
+    google_creds_ok = bool(
+        GOOGLE_CREDS_PATH and os.path.exists(GOOGLE_CREDS_PATH)
+    )
     return {
         "status": "healthy",
         "template_available": os.path.exists(TEMPLATE_PATH),
         "generator_font": IBPresentationGenerator.FONT_TITLE,
+        "google_slides_available": google_creds_ok,
     }
 
 
@@ -245,3 +251,52 @@ async def preview_slides(request: Request):
         "layouts_used": [s.layout for s in pres.slides],
         "slides": pres.model_dump()["slides"],
     }
+
+
+@app.post("/generate-slides")
+async def generate_google_slides(request: Request):
+    """
+    Gera uma apresentação no Google Slides com gráficos vinculados
+    a uma Google Sheet. Retorna as URLs para ambos os documentos.
+    """
+    try:
+        raw_body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Body must be valid JSON")
+
+    try:
+        pres = PresentationRequest.model_validate(raw_body)
+    except Exception as e:
+        logger.warning("Validation failed, attempting auto-fix: %s", e)
+        if isinstance(raw_body, dict):
+            raw_body.setdefault("presentation_title", "Apresentação")
+            raw_body.setdefault("slides", [])
+        try:
+            pres = PresentationRequest.model_validate(raw_body)
+        except Exception as e2:
+            logger.error("Validation still failed: %s", e2)
+            raise HTTPException(status_code=400, detail=str(e2))
+
+    try:
+        logger.info(
+            "Gerando Google Slides '%s' com %d slides",
+            pres.presentation_title,
+            len(pres.slides),
+        )
+
+        gen = GoogleSlidesGenerator(credentials_path=GOOGLE_CREDS_PATH or None)
+        data = pres.model_dump()
+        result = gen.generate(data)
+
+        logger.info(
+            "Google Slides gerado: %s", result.get("slides_url", "")
+        )
+
+        return result
+
+    except ValueError as e:
+        logger.error("Erro de validação: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Erro ao gerar Google Slides: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
