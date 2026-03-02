@@ -73,7 +73,7 @@ class GoogleSlidesGenerator:
     CONTENT_TOP = _inches(1.2)
     FOOTER_TOP = _inches(7.1)
 
-    def __init__(self, credentials_path: str | None = None):
+    def __init__(self, credentials_path: str | None = None, folder_id: str | None = None):
         creds_path = credentials_path or os.environ.get(
             "GOOGLE_APPLICATION_CREDENTIALS"
         )
@@ -89,6 +89,7 @@ class GoogleSlidesGenerator:
         self._sheets = build("sheets", "v4", credentials=self._credentials)
         self._slides = build("slides", "v1", credentials=self._credentials)
         self._drive = build("drive", "v3", credentials=self._credentials)
+        self._folder_id = folder_id or os.environ.get("DRIVE_FOLDER_ID")
         self._page_num = 0
 
     # ================================================================ #
@@ -143,25 +144,60 @@ class GoogleSlidesGenerator:
     def _create_spreadsheet(
         self, title: str, chart_slides: list[tuple[int, dict]]
     ) -> tuple[str, dict]:
-        sheet_defs = []
+        sheet_names: list[str] = []
         for idx, (_, slide_data) in enumerate(chart_slides):
             raw_name = slide_data.get("title", f"Chart {idx + 1}")
             safe_name = re.sub(r"[^\w\s-]", "", raw_name)[:30].strip() or f"Chart_{idx + 1}"
-            sheet_defs.append(
-                {"properties": {"sheetId": idx, "title": safe_name, "index": idx}}
-            )
+            sheet_names.append(safe_name)
 
-        result = (
-            self._sheets.spreadsheets()
-            .create(
-                body={
-                    "properties": {"title": f"{title} - Dados"},
-                    "sheets": sheet_defs,
-                }
-            )
-            .execute()
-        )
-        spreadsheet_id: str = result["spreadsheetId"]
+        file_meta: dict[str, Any] = {
+            "name": f"{title} - Dados",
+            "mimeType": "application/vnd.google-apps.spreadsheet",
+        }
+        if self._folder_id:
+            file_meta["parents"] = [self._folder_id]
+
+        created = self._drive.files().create(body=file_meta, fields="id").execute()
+        spreadsheet_id: str = created["id"]
+
+        ss = self._sheets.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        default_sheet_id = ss["sheets"][0]["properties"]["sheetId"]
+
+        batch_reqs: list[dict] = []
+        sheet_id_map: list[int] = []
+
+        for idx, name in enumerate(sheet_names):
+            if idx == 0:
+                batch_reqs.append({
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": default_sheet_id,
+                            "title": name,
+                            "index": 0,
+                        },
+                        "fields": "title,index",
+                    }
+                })
+                sheet_id_map.append(default_sheet_id)
+            else:
+                new_id = idx * 100
+                batch_reqs.append({
+                    "addSheet": {
+                        "properties": {
+                            "sheetId": new_id,
+                            "title": name,
+                            "index": idx,
+                        }
+                    }
+                })
+                sheet_id_map.append(new_id)
+
+        if batch_reqs:
+            self._sheets.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": batch_reqs},
+            ).execute()
+
         chart_map: dict[int, int] = {}
 
         for idx, (slide_idx, slide_data) in enumerate(chart_slides):
@@ -174,11 +210,10 @@ class GoogleSlidesGenerator:
             if not categories or not series_list:
                 continue
 
-            sheet_id = idx
-            safe_name = result["sheets"][idx]["properties"]["title"]
+            sheet_id = sheet_id_map[idx]
 
             self._populate_sheet(
-                spreadsheet_id, safe_name, categories, series_list
+                spreadsheet_id, sheet_names[idx], categories, series_list
             )
             chart_id = self._add_chart_to_sheet(
                 spreadsheet_id,
@@ -396,21 +431,37 @@ class GoogleSlidesGenerator:
         spreadsheet_id: str | None,
         chart_map: dict[int, int],
     ) -> str:
-        pres = (
-            self._slides.presentations()
-            .create(
-                body={
-                    "title": title,
-                    "pageSize": {
-                        "width": {"magnitude": self.SLIDE_W, "unit": "EMU"},
-                        "height": {"magnitude": self.SLIDE_H, "unit": "EMU"},
-                    },
-                }
-            )
-            .execute()
-        )
-        presentation_id: str = pres["presentationId"]
+        file_meta: dict[str, Any] = {
+            "name": title,
+            "mimeType": "application/vnd.google-apps.presentation",
+        }
+        if self._folder_id:
+            file_meta["parents"] = [self._folder_id]
+
+        created = self._drive.files().create(body=file_meta, fields="id").execute()
+        presentation_id: str = created["id"]
+
+        pres = self._slides.presentations().get(
+            presentationId=presentation_id
+        ).execute()
         default_slide_id: str = pres["slides"][0]["objectId"]
+
+        actual_w = pres.get("pageSize", {}).get("width", {}).get("magnitude", self.SLIDE_W)
+        actual_h = pres.get("pageSize", {}).get("height", {}).get("magnitude", self.SLIDE_H)
+        design_w = type(self).SLIDE_W
+        design_h = type(self).SLIDE_H
+        if actual_w != design_w or actual_h != design_h:
+            sx = actual_w / design_w
+            sy = actual_h / design_h
+            self.SLIDE_W = int(actual_w)
+            self.SLIDE_H = int(actual_h)
+            self.MARGIN_L = int(type(self).MARGIN_L * sx)
+            self.CONTENT_W = int(type(self).CONTENT_W * sx)
+            self.TITLE_TOP = int(type(self).TITLE_TOP * sy)
+            self.TITLE_H = int(type(self).TITLE_H * sy)
+            self.SEPARATOR_TOP = int(type(self).SEPARATOR_TOP * sy)
+            self.CONTENT_TOP = int(type(self).CONTENT_TOP * sy)
+            self.FOOTER_TOP = int(type(self).FOOTER_TOP * sy)
 
         setup_requests: list[dict] = [
             {"deleteObject": {"objectId": default_slide_id}}

@@ -35,6 +35,7 @@ app.add_middleware(
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 TEMPLATE_PATH = os.path.join(TEMPLATE_DIR, "ib_master.pptx")
 GOOGLE_CREDS_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 
 
 def _to_str(v: Any) -> str:
@@ -243,103 +244,67 @@ def diagnose():
                 info["raw_content"] = exc.content.decode("utf-8", errors="replace")
         return info
 
-    # --- Test Drive API (list) ---
-    try:
-        drive = build("drive", "v3", credentials=creds)
-        resp = drive.files().list(pageSize=1, fields="files(id,name)").execute()
-        results["tests"]["drive_list"] = {
-            "status": "OK",
-            "files_found": len(resp.get("files", [])),
-        }
-    except Exception as e:
-        results["tests"]["drive_list"] = {"status": "FAILED", **_extract_error(e)}
+    folder_id = DRIVE_FOLDER_ID
+    results["config"] = {"folder_id": folder_id or "(not set)"}
 
-    # --- Test Drive API (create file) ---
+    drive = build("drive", "v3", credentials=creds)
+
+    # --- Test: create spreadsheet in shared folder ---
     try:
-        drive = build("drive", "v3", credentials=creds)
-        file_meta = {"name": "_diagnose_drive_create_", "mimeType": "application/vnd.google-apps.document"}
+        file_meta: dict[str, Any] = {
+            "name": "_diagnose_sheet_",
+            "mimeType": "application/vnd.google-apps.spreadsheet",
+        }
+        if folder_id:
+            file_meta["parents"] = [folder_id]
         created = drive.files().create(body=file_meta, fields="id").execute()
         fid = created["id"]
-        results["tests"]["drive_create"] = {"status": "OK", "test_id": fid}
-        try:
-            drive.files().delete(fileId=fid).execute()
-            results["tests"]["drive_create"]["cleanup"] = "deleted"
-        except Exception:
-            results["tests"]["drive_create"]["cleanup"] = "could not delete"
-    except Exception as e:
-        results["tests"]["drive_create"] = {"status": "FAILED", **_extract_error(e)}
+        results["tests"]["sheet_in_folder"] = {"status": "OK", "test_id": fid}
 
-    # --- Test Drive API (create spreadsheet via Drive) ---
-    try:
-        drive = build("drive", "v3", credentials=creds)
-        file_meta = {"name": "_diagnose_sheet_via_drive_", "mimeType": "application/vnd.google-apps.spreadsheet"}
-        created = drive.files().create(body=file_meta, fields="id").execute()
-        fid = created["id"]
-        results["tests"]["sheet_via_drive"] = {"status": "OK", "test_id": fid}
-        try:
-            drive.files().delete(fileId=fid).execute()
-            results["tests"]["sheet_via_drive"]["cleanup"] = "deleted"
-        except Exception:
-            results["tests"]["sheet_via_drive"]["cleanup"] = "could not delete"
-    except Exception as e:
-        results["tests"]["sheet_via_drive"] = {"status": "FAILED", **_extract_error(e)}
-
-    # --- Check enabled APIs via Service Usage ---
-    try:
-        su = build("serviceusage", "v1", credentials=creds)
-        project_id = creds_data.get("project_id", "")
-        resp = su.services().list(
-            parent=f"projects/{project_id}",
-            filter="state:ENABLED",
-            pageSize=200,
-        ).execute()
-        enabled = [s.get("config", {}).get("name", s.get("name", "")) for s in resp.get("services", [])]
-        target_apis = ["sheets.googleapis.com", "slides.googleapis.com", "drive.googleapis.com"]
-        results["tests"]["enabled_apis"] = {
-            "status": "OK",
-            "target_check": {api: api in " ".join(enabled) for api in target_apis},
-            "total_enabled": len(enabled),
-        }
-    except Exception as e:
-        results["tests"]["enabled_apis"] = {"status": "FAILED", **_extract_error(e)}
-
-    # --- Test Sheets API ---
-    try:
         sheets = build("sheets", "v4", credentials=creds)
-        sheet = (
-            sheets.spreadsheets()
-            .create(body={"properties": {"title": "_diagnose_test_"}})
-            .execute()
-        )
-        sid = sheet["spreadsheetId"]
-        results["tests"]["sheets"] = {"status": "OK", "test_id": sid}
-        try:
-            drive = build("drive", "v3", credentials=creds)
-            drive.files().delete(fileId=sid).execute()
-            results["tests"]["sheets"]["cleanup"] = "deleted"
-        except Exception:
-            results["tests"]["sheets"]["cleanup"] = "could not delete"
-    except Exception as e:
-        results["tests"]["sheets"] = {"status": "FAILED", **_extract_error(e)}
+        sheets.spreadsheets().values().update(
+            spreadsheetId=fid,
+            range="Sheet1!A1",
+            valueInputOption="RAW",
+            body={"values": [["test"]]},
+        ).execute()
+        results["tests"]["sheet_in_folder"]["write"] = "OK"
 
-    # --- Test Slides API ---
-    try:
-        slides_svc = build("slides", "v1", credentials=creds)
-        pres = (
-            slides_svc.presentations()
-            .create(body={"title": "_diagnose_test_"})
-            .execute()
-        )
-        pid = pres["presentationId"]
-        results["tests"]["slides"] = {"status": "OK", "test_id": pid}
         try:
-            drive = build("drive", "v3", credentials=creds)
-            drive.files().delete(fileId=pid).execute()
-            results["tests"]["slides"]["cleanup"] = "deleted"
+            drive.files().delete(fileId=fid).execute()
+            results["tests"]["sheet_in_folder"]["cleanup"] = "deleted"
         except Exception:
-            results["tests"]["slides"]["cleanup"] = "could not delete"
+            results["tests"]["sheet_in_folder"]["cleanup"] = "could not delete"
     except Exception as e:
-        results["tests"]["slides"] = {"status": "FAILED", **_extract_error(e)}
+        results["tests"]["sheet_in_folder"] = {"status": "FAILED", **_extract_error(e)}
+
+    # --- Test: create presentation in shared folder ---
+    try:
+        file_meta = {
+            "name": "_diagnose_pres_",
+            "mimeType": "application/vnd.google-apps.presentation",
+        }
+        if folder_id:
+            file_meta["parents"] = [folder_id]
+        created = drive.files().create(body=file_meta, fields="id").execute()
+        pid = created["id"]
+
+        slides_svc = build("slides", "v1", credentials=creds)
+        pres = slides_svc.presentations().get(presentationId=pid).execute()
+        page_size = pres.get("pageSize", {})
+        results["tests"]["pres_in_folder"] = {
+            "status": "OK",
+            "test_id": pid,
+            "page_size": page_size,
+        }
+
+        try:
+            drive.files().delete(fileId=pid).execute()
+            results["tests"]["pres_in_folder"]["cleanup"] = "deleted"
+        except Exception:
+            results["tests"]["pres_in_folder"]["cleanup"] = "could not delete"
+    except Exception as e:
+        results["tests"]["pres_in_folder"] = {"status": "FAILED", **_extract_error(e)}
 
     return results
 
@@ -447,7 +412,10 @@ async def generate_google_slides(request: Request):
             len(pres.slides),
         )
 
-        gen = GoogleSlidesGenerator(credentials_path=GOOGLE_CREDS_PATH or None)
+        gen = GoogleSlidesGenerator(
+            credentials_path=GOOGLE_CREDS_PATH or None,
+            folder_id=DRIVE_FOLDER_ID or None,
+        )
         data = pres.model_dump()
         result = gen.generate(data)
 
