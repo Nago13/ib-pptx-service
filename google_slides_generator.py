@@ -12,6 +12,8 @@ import logging
 from typing import Any
 
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials as OAuthCredentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 logger = logging.getLogger(__name__)
@@ -74,23 +76,43 @@ class GoogleSlidesGenerator:
     FOOTER_TOP = _inches(7.1)
 
     def __init__(self, credentials_path: str | None = None, folder_id: str | None = None):
-        creds_path = credentials_path or os.environ.get(
-            "GOOGLE_APPLICATION_CREDENTIALS"
-        )
-        if not creds_path or not os.path.exists(creds_path):
-            raise ValueError(
-                "Google credentials file not found. "
-                "Set GOOGLE_APPLICATION_CREDENTIALS or pass credentials_path."
-            )
-
-        self._credentials = service_account.Credentials.from_service_account_file(
-            creds_path, scopes=self.SCOPES
-        )
+        self._credentials = self._build_credentials(credentials_path)
         self._sheets = build("sheets", "v4", credentials=self._credentials)
         self._slides = build("slides", "v1", credentials=self._credentials)
         self._drive = build("drive", "v3", credentials=self._credentials)
         self._folder_id = folder_id or os.environ.get("DRIVE_FOLDER_ID")
         self._page_num = 0
+
+    @classmethod
+    def _build_credentials(cls, credentials_path: str | None = None):
+        client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+        client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+        refresh_token = os.environ.get("GOOGLE_REFRESH_TOKEN", "")
+
+        if client_id and client_secret and refresh_token:
+            creds = OAuthCredentials(
+                token=None,
+                refresh_token=refresh_token,
+                client_id=client_id,
+                client_secret=client_secret,
+                token_uri="https://oauth2.googleapis.com/token",
+                scopes=cls.SCOPES,
+            )
+            creds.refresh(Request())
+            return creds
+
+        creds_path = credentials_path or os.environ.get(
+            "GOOGLE_APPLICATION_CREDENTIALS"
+        )
+        if not creds_path or not os.path.exists(creds_path):
+            raise ValueError(
+                "Google credentials not found. Set GOOGLE_CLIENT_ID + "
+                "GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN for OAuth2, "
+                "or GOOGLE_APPLICATION_CREDENTIALS for service account."
+            )
+        return service_account.Credentials.from_service_account_file(
+            creds_path, scopes=cls.SCOPES
+        )
 
     # ================================================================ #
     #  PUBLIC                                                           #

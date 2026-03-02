@@ -184,46 +184,13 @@ def health_check():
 
 @app.get("/diagnose")
 def diagnose():
-    """Tests Google API credentials and permissions for each service."""
+    """Tests Google API credentials and permissions."""
     import json
-    from google.oauth2 import service_account as sa
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
+    from google_slides_generator import GoogleSlidesGenerator
 
-    results: dict[str, Any] = {"credentials": {}, "tests": {}}
-
-    if not GOOGLE_CREDS_PATH or not os.path.exists(GOOGLE_CREDS_PATH):
-        results["credentials"]["error"] = (
-            f"File not found: '{GOOGLE_CREDS_PATH}'"
-        )
-        return results
-
-    try:
-        with open(GOOGLE_CREDS_PATH) as f:
-            creds_data = json.load(f)
-        results["credentials"] = {
-            "client_email": creds_data.get("client_email"),
-            "project_id": creds_data.get("project_id"),
-            "type": creds_data.get("type"),
-            "file_path": GOOGLE_CREDS_PATH,
-        }
-    except Exception as e:
-        results["credentials"]["error"] = str(e)
-        return results
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/presentations",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    try:
-        creds = sa.Credentials.from_service_account_file(
-            GOOGLE_CREDS_PATH, scopes=scopes
-        )
-        results["credentials"]["scopes"] = scopes
-    except Exception as e:
-        results["credentials"]["auth_error"] = str(e)
-        return results
+    results: dict[str, Any] = {"auth_mode": "", "tests": {}}
 
     def _extract_error(exc: Exception) -> dict:
         info: dict[str, Any] = {"summary": str(exc)}
@@ -232,24 +199,24 @@ def diagnose():
             try:
                 body = json.loads(exc.content.decode("utf-8"))
                 info["error_body"] = body
-                err = body.get("error", {})
-                info["reason"] = err.get("status", "")
-                details = err.get("details", [])
-                for d in details:
-                    if d.get("@type", "").endswith("ErrorInfo"):
-                        info["error_reason"] = d.get("reason", "")
-                        info["error_domain"] = d.get("domain", "")
-                        info["error_metadata"] = d.get("metadata", {})
             except Exception:
                 info["raw_content"] = exc.content.decode("utf-8", errors="replace")
         return info
+
+    try:
+        creds = GoogleSlidesGenerator._build_credentials(GOOGLE_CREDS_PATH or None)
+        auth_type = type(creds).__name__
+        results["auth_mode"] = auth_type
+    except Exception as e:
+        results["auth_error"] = str(e)
+        return results
 
     folder_id = DRIVE_FOLDER_ID
     results["config"] = {"folder_id": folder_id or "(not set)"}
 
     drive = build("drive", "v3", credentials=creds)
 
-    # --- Test: create spreadsheet in shared folder ---
+    # --- Test: create spreadsheet ---
     try:
         file_meta: dict[str, Any] = {
             "name": "_diagnose_sheet_",
@@ -259,7 +226,7 @@ def diagnose():
             file_meta["parents"] = [folder_id]
         created = drive.files().create(body=file_meta, fields="id").execute()
         fid = created["id"]
-        results["tests"]["sheet_in_folder"] = {"status": "OK", "test_id": fid}
+        results["tests"]["create_sheet"] = {"status": "OK", "test_id": fid}
 
         sheets = build("sheets", "v4", credentials=creds)
         sheets.spreadsheets().values().update(
@@ -268,17 +235,17 @@ def diagnose():
             valueInputOption="RAW",
             body={"values": [["test"]]},
         ).execute()
-        results["tests"]["sheet_in_folder"]["write"] = "OK"
+        results["tests"]["create_sheet"]["write"] = "OK"
 
         try:
             drive.files().delete(fileId=fid).execute()
-            results["tests"]["sheet_in_folder"]["cleanup"] = "deleted"
+            results["tests"]["create_sheet"]["cleanup"] = "deleted"
         except Exception:
-            results["tests"]["sheet_in_folder"]["cleanup"] = "could not delete"
+            results["tests"]["create_sheet"]["cleanup"] = "could not delete"
     except Exception as e:
-        results["tests"]["sheet_in_folder"] = {"status": "FAILED", **_extract_error(e)}
+        results["tests"]["create_sheet"] = {"status": "FAILED", **_extract_error(e)}
 
-    # --- Test: create presentation in shared folder ---
+    # --- Test: create presentation ---
     try:
         file_meta = {
             "name": "_diagnose_pres_",
@@ -292,7 +259,7 @@ def diagnose():
         slides_svc = build("slides", "v1", credentials=creds)
         pres = slides_svc.presentations().get(presentationId=pid).execute()
         page_size = pres.get("pageSize", {})
-        results["tests"]["pres_in_folder"] = {
+        results["tests"]["create_pres"] = {
             "status": "OK",
             "test_id": pid,
             "page_size": page_size,
@@ -300,11 +267,11 @@ def diagnose():
 
         try:
             drive.files().delete(fileId=pid).execute()
-            results["tests"]["pres_in_folder"]["cleanup"] = "deleted"
+            results["tests"]["create_pres"]["cleanup"] = "deleted"
         except Exception:
-            results["tests"]["pres_in_folder"]["cleanup"] = "could not delete"
+            results["tests"]["create_pres"]["cleanup"] = "could not delete"
     except Exception as e:
-        results["tests"]["pres_in_folder"] = {"status": "FAILED", **_extract_error(e)}
+        results["tests"]["create_pres"] = {"status": "FAILED", **_extract_error(e)}
 
     return results
 
