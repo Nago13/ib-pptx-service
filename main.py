@@ -187,6 +187,7 @@ def diagnose():
     import json
     from google.oauth2 import service_account as sa
     from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
 
     results: dict[str, Any] = {"credentials": {}, "tests": {}}
 
@@ -218,9 +219,29 @@ def diagnose():
         creds = sa.Credentials.from_service_account_file(
             GOOGLE_CREDS_PATH, scopes=scopes
         )
+        results["credentials"]["scopes"] = scopes
     except Exception as e:
         results["credentials"]["auth_error"] = str(e)
         return results
+
+    def _extract_error(exc: Exception) -> dict:
+        info: dict[str, Any] = {"summary": str(exc)}
+        if isinstance(exc, HttpError):
+            info["status_code"] = exc.resp.status
+            try:
+                body = json.loads(exc.content.decode("utf-8"))
+                info["error_body"] = body
+                err = body.get("error", {})
+                info["reason"] = err.get("status", "")
+                details = err.get("details", [])
+                for d in details:
+                    if d.get("@type", "").endswith("ErrorInfo"):
+                        info["error_reason"] = d.get("reason", "")
+                        info["error_domain"] = d.get("domain", "")
+                        info["error_metadata"] = d.get("metadata", {})
+            except Exception:
+                info["raw_content"] = exc.content.decode("utf-8", errors="replace")
+        return info
 
     # --- Test Drive API ---
     try:
@@ -231,7 +252,7 @@ def diagnose():
             "files_found": len(resp.get("files", [])),
         }
     except Exception as e:
-        results["tests"]["drive"] = {"status": "FAILED", "error": str(e)}
+        results["tests"]["drive"] = {"status": "FAILED", **_extract_error(e)}
 
     # --- Test Sheets API ---
     try:
@@ -250,7 +271,7 @@ def diagnose():
         except Exception:
             results["tests"]["sheets"]["cleanup"] = "could not delete"
     except Exception as e:
-        results["tests"]["sheets"] = {"status": "FAILED", "error": str(e)}
+        results["tests"]["sheets"] = {"status": "FAILED", **_extract_error(e)}
 
     # --- Test Slides API ---
     try:
@@ -269,7 +290,7 @@ def diagnose():
         except Exception:
             results["tests"]["slides"]["cleanup"] = "could not delete"
     except Exception as e:
-        results["tests"]["slides"] = {"status": "FAILED", "error": str(e)}
+        results["tests"]["slides"] = {"status": "FAILED", **_extract_error(e)}
 
     return results
 
