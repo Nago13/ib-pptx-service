@@ -229,9 +229,13 @@ def diagnose():
         results["tests"]["create_sheet"] = {"status": "OK", "test_id": fid}
 
         sheets = build("sheets", "v4", credentials=creds)
+        meta = sheets.spreadsheets().get(spreadsheetId=fid).execute()
+        first_sheet = meta["sheets"][0]["properties"]["title"]
+        range_a1 = f"'{first_sheet}'!A1"
+
         sheets.spreadsheets().values().update(
             spreadsheetId=fid,
-            range="Sheet1!A1",
+            range=range_a1,
             valueInputOption="RAW",
             body={"values": [["test"]]},
         ).execute()
