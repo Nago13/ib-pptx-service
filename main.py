@@ -181,6 +181,99 @@ def health_check():
     }
 
 
+@app.get("/diagnose")
+def diagnose():
+    """Tests Google API credentials and permissions for each service."""
+    import json
+    from google.oauth2 import service_account as sa
+    from googleapiclient.discovery import build
+
+    results: dict[str, Any] = {"credentials": {}, "tests": {}}
+
+    if not GOOGLE_CREDS_PATH or not os.path.exists(GOOGLE_CREDS_PATH):
+        results["credentials"]["error"] = (
+            f"File not found: '{GOOGLE_CREDS_PATH}'"
+        )
+        return results
+
+    try:
+        with open(GOOGLE_CREDS_PATH) as f:
+            creds_data = json.load(f)
+        results["credentials"] = {
+            "client_email": creds_data.get("client_email"),
+            "project_id": creds_data.get("project_id"),
+            "type": creds_data.get("type"),
+            "file_path": GOOGLE_CREDS_PATH,
+        }
+    except Exception as e:
+        results["credentials"]["error"] = str(e)
+        return results
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/presentations",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    try:
+        creds = sa.Credentials.from_service_account_file(
+            GOOGLE_CREDS_PATH, scopes=scopes
+        )
+    except Exception as e:
+        results["credentials"]["auth_error"] = str(e)
+        return results
+
+    # --- Test Drive API ---
+    try:
+        drive = build("drive", "v3", credentials=creds)
+        resp = drive.files().list(pageSize=1, fields="files(id,name)").execute()
+        results["tests"]["drive"] = {
+            "status": "OK",
+            "files_found": len(resp.get("files", [])),
+        }
+    except Exception as e:
+        results["tests"]["drive"] = {"status": "FAILED", "error": str(e)}
+
+    # --- Test Sheets API ---
+    try:
+        sheets = build("sheets", "v4", credentials=creds)
+        sheet = (
+            sheets.spreadsheets()
+            .create(body={"properties": {"title": "_diagnose_test_"}})
+            .execute()
+        )
+        sid = sheet["spreadsheetId"]
+        results["tests"]["sheets"] = {"status": "OK", "test_id": sid}
+        try:
+            drive = build("drive", "v3", credentials=creds)
+            drive.files().delete(fileId=sid).execute()
+            results["tests"]["sheets"]["cleanup"] = "deleted"
+        except Exception:
+            results["tests"]["sheets"]["cleanup"] = "could not delete"
+    except Exception as e:
+        results["tests"]["sheets"] = {"status": "FAILED", "error": str(e)}
+
+    # --- Test Slides API ---
+    try:
+        slides_svc = build("slides", "v1", credentials=creds)
+        pres = (
+            slides_svc.presentations()
+            .create(body={"title": "_diagnose_test_"})
+            .execute()
+        )
+        pid = pres["presentationId"]
+        results["tests"]["slides"] = {"status": "OK", "test_id": pid}
+        try:
+            drive = build("drive", "v3", credentials=creds)
+            drive.files().delete(fileId=pid).execute()
+            results["tests"]["slides"]["cleanup"] = "deleted"
+        except Exception:
+            results["tests"]["slides"]["cleanup"] = "could not delete"
+    except Exception as e:
+        results["tests"]["slides"] = {"status": "FAILED", "error": str(e)}
+
+    return results
+
+
 @app.post("/generate")
 async def generate_presentation(request: Request):
     try:
