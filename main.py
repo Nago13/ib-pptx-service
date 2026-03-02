@@ -243,16 +243,65 @@ def diagnose():
                 info["raw_content"] = exc.content.decode("utf-8", errors="replace")
         return info
 
-    # --- Test Drive API ---
+    # --- Test Drive API (list) ---
     try:
         drive = build("drive", "v3", credentials=creds)
         resp = drive.files().list(pageSize=1, fields="files(id,name)").execute()
-        results["tests"]["drive"] = {
+        results["tests"]["drive_list"] = {
             "status": "OK",
             "files_found": len(resp.get("files", [])),
         }
     except Exception as e:
-        results["tests"]["drive"] = {"status": "FAILED", **_extract_error(e)}
+        results["tests"]["drive_list"] = {"status": "FAILED", **_extract_error(e)}
+
+    # --- Test Drive API (create file) ---
+    try:
+        drive = build("drive", "v3", credentials=creds)
+        file_meta = {"name": "_diagnose_drive_create_", "mimeType": "application/vnd.google-apps.document"}
+        created = drive.files().create(body=file_meta, fields="id").execute()
+        fid = created["id"]
+        results["tests"]["drive_create"] = {"status": "OK", "test_id": fid}
+        try:
+            drive.files().delete(fileId=fid).execute()
+            results["tests"]["drive_create"]["cleanup"] = "deleted"
+        except Exception:
+            results["tests"]["drive_create"]["cleanup"] = "could not delete"
+    except Exception as e:
+        results["tests"]["drive_create"] = {"status": "FAILED", **_extract_error(e)}
+
+    # --- Test Drive API (create spreadsheet via Drive) ---
+    try:
+        drive = build("drive", "v3", credentials=creds)
+        file_meta = {"name": "_diagnose_sheet_via_drive_", "mimeType": "application/vnd.google-apps.spreadsheet"}
+        created = drive.files().create(body=file_meta, fields="id").execute()
+        fid = created["id"]
+        results["tests"]["sheet_via_drive"] = {"status": "OK", "test_id": fid}
+        try:
+            drive.files().delete(fileId=fid).execute()
+            results["tests"]["sheet_via_drive"]["cleanup"] = "deleted"
+        except Exception:
+            results["tests"]["sheet_via_drive"]["cleanup"] = "could not delete"
+    except Exception as e:
+        results["tests"]["sheet_via_drive"] = {"status": "FAILED", **_extract_error(e)}
+
+    # --- Check enabled APIs via Service Usage ---
+    try:
+        su = build("serviceusage", "v1", credentials=creds)
+        project_id = creds_data.get("project_id", "")
+        resp = su.services().list(
+            parent=f"projects/{project_id}",
+            filter="state:ENABLED",
+            pageSize=200,
+        ).execute()
+        enabled = [s.get("config", {}).get("name", s.get("name", "")) for s in resp.get("services", [])]
+        target_apis = ["sheets.googleapis.com", "slides.googleapis.com", "drive.googleapis.com"]
+        results["tests"]["enabled_apis"] = {
+            "status": "OK",
+            "target_check": {api: api in " ".join(enabled) for api in target_apis},
+            "total_enabled": len(enabled),
+        }
+    except Exception as e:
+        results["tests"]["enabled_apis"] = {"status": "FAILED", **_extract_error(e)}
 
     # --- Test Sheets API ---
     try:
