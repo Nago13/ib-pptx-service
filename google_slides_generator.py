@@ -64,6 +64,7 @@ class GoogleSlidesGenerator:
 
     FONT_TITLE = "Inter"
     FONT_BODY = "Inter"
+    MAX_CHARS_PER_LINE = 72  # evita overflow em colunas estreitas
 
     SLIDE_W = _inches(13.333)
     SLIDE_H = _inches(7.5)
@@ -567,14 +568,14 @@ class GoogleSlidesGenerator:
 
         bullets = data.get("bullets", [])
         if bullets:
-            text = "\n".join(f"\u2022  {b}" for b in bullets)
+            text = self._format_bullets(bullets)
             reqs += self._textbox(
                 sid, f"{sid}_bul", text,
-                self.MARGIN_L + _inches(0.3),
+                self.MARGIN_L + _inches(0.35),
                 self.CONTENT_TOP + _inches(0.15),
-                self.CONTENT_W - _inches(0.6),
+                self.CONTENT_W - _inches(0.7),
                 _inches(5.0),
-                size=14, color=self.DARK_TEXT, line_spacing=200,
+                size=12, color=self.DARK_TEXT, line_spacing=190,
             )
         return reqs
 
@@ -583,8 +584,10 @@ class GoogleSlidesGenerator:
         reqs += self._title_area(sid, data.get("title", ""))
         reqs += self._footer(sid)
 
-        col_w = _inches(5.6)
-        gap = _inches(0.9)
+        # Colunas mais largas (gap menor) e fontes menores para evitar overflow
+        gap = _inches(0.45)
+        col_w = (self.CONTENT_W - gap) // 2
+        pad_h = _inches(0.12)
 
         for ci, key in enumerate(("left_column", "right_column")):
             col = data.get(key) or {}
@@ -595,7 +598,7 @@ class GoogleSlidesGenerator:
                 reqs += self._textbox(
                     sid, f"{sid}_c{ci}s", sub,
                     left, self.CONTENT_TOP, col_w, _inches(0.42),
-                    size=16, color=self.IB_BLUE, bold=True, font=self.FONT_TITLE,
+                    size=14, color=self.IB_BLUE, bold=True, font=self.FONT_TITLE,
                 )
                 reqs += self._rect(
                     sid, f"{sid}_c{ci}l",
@@ -605,14 +608,14 @@ class GoogleSlidesGenerator:
 
             bul = col.get("bullets", [])
             if bul:
-                text = "\n".join(f"\u2022  {b}" for b in bul)
+                text = self._format_bullets(bul, max_line_len=58)
                 reqs += self._textbox(
                     sid, f"{sid}_c{ci}b", text,
-                    left + _inches(0.15),
+                    left + pad_h,
                     self.CONTENT_TOP + _inches(0.65),
-                    col_w - _inches(0.3),
+                    col_w - pad_h * 2,
                     _inches(4.5),
-                    size=13, color=self.DARK_TEXT, line_spacing=185,
+                    size=11, color=self.DARK_TEXT, line_spacing=175,
                 )
 
         reqs += self._rect(
@@ -889,6 +892,39 @@ class GoogleSlidesGenerator:
     # ================================================================ #
     #  REQUEST HELPERS                                                  #
     # ================================================================ #
+
+    @staticmethod
+    def _wrap_long_line(text: str, max_len: int = 72) -> str:
+        """Quebra linhas longas em word boundaries para caber nas margens."""
+        if len(text) <= max_len:
+            return text
+        words = text.split()
+        lines = []
+        current = []
+        length = 0
+        for w in words:
+            need = len(w) + (1 if current else 0)
+            if length + need > max_len and current:
+                lines.append(" ".join(current))
+                current = [w]
+                length = len(w)
+            else:
+                current.append(w)
+                length += need
+        if current:
+            lines.append(" ".join(current))
+        return "\n".join(lines)
+
+    def _format_bullets(self, bullets: list[str], max_line_len: int | None = None) -> str:
+        """Formata bullets com quebra de linha para evitar overflow."""
+        ml = max_line_len or self.MAX_CHARS_PER_LINE
+        parts = []
+        for b in bullets:
+            wrapped = self._wrap_long_line(b, ml)
+            for i, line in enumerate(wrapped.split("\n")):
+                prefix = "\u2022  " if i == 0 else "   "
+                parts.append(prefix + line)
+        return "\n".join(parts)
 
     @staticmethod
     def _bg(slide_id: str, color: dict) -> dict:
